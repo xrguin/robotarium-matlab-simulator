@@ -12,7 +12,7 @@ uni_barrier_cert = create_uni_barrier_certificate_with_boundary();
 % Parameters
 sampleTime = r.time_step;
 simulationTime = 30;
-iterations = simulationTime / sampleTime;
+iterations = ceil(simulationTime / sampleTime);
 
 % APF parameters
 detection_radius = 2.0; % Smaller for Robotarium scale
@@ -20,6 +20,9 @@ safe_radius = 0.3;
 attraction_factor = 2;
 repulsion_factor = 0.8;
 goal_radius = 0.1;
+
+x_bound = 1.5;
+y_bound = 0.9;
 
 % Generate initial positions using Robotarium's built-in function
 initial_positions = generate_initial_conditions(N, 'Spacing', 0.5);

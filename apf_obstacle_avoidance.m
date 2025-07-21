@@ -5,44 +5,54 @@
 
 %% Initialize Robotarium
 N = 2; % Number of robots (2 robots avoiding each other)
-r = Robotarium('NumberOfRobots', N, 'ShowFigure', true);
 
 % Parameters matching original simulation
-sampleTime = r.time_step; % Use Robotarium's time step
-simulationTime = 30;
-iterations = simulationTime / sampleTime;
+sampleTime = 0.033; % Typical Robotarium time step
+simulationTime = 300;
+iterations = ceil(simulationTime / sampleTime);
 
 % APF parameters
-detection_radius = 15;
-safe_radius = 1;
+detection_radius = 0.5;  % Scaled for Robotarium arena
+safe_radius = 0.3;       % Minimum safe distance between robots
 attraction_factor = 1;
-repulsion_factors = [1.2, 1]; % Different repulsion factors for each robot
+repulsion_factor = 1; % Different repulsion factors for each robot
+safe_distance = 1;
 
 % Goal radius for checking arrival
-goal_radius = 0.5;
+goal_radius = 0.1;
 
-% Generate initial positions and goals similar to original
-test_site_size = 15;
-distance = 8;
+% Robotarium arena bounds
+x_bound = 1.5;  % Leave small margin from actual boundary
+y_bound = 0.9;  % Leave small margin from actual boundary
 
 % Robot 1 (green robot in original)
 rng('shuffle');
-start1 = rand(1,2) * test_site_size;
-goal1 = generateRandomGoal(start1, distance, test_site_size);
+start1 = [(rand()*2-1)*x_bound; (rand()*2-1)*y_bound];
+% Generate goal at least 1 meter away
+angle1 = rand() * 2 * pi;
+distance = 1.0 + rand() * 0.5;  % 1 to 1.5 meters
+goal1 = start1 + distance * [cos(angle1); sin(angle1)];
+% Ensure goal is within bounds
+goal1(1) = max(-x_bound, min(x_bound, goal1(1)));
+goal1(2) = max(-y_bound, min(y_bound, goal1(2)));
 
 % Robot 2 (blue robot in original) - generate intercepting path
-[start2, goal2] = generateInterceptingPath(start1, goal1, test_site_size, distance);
+% Robot 2 - generate intercepting path using similar logic to generateInterceptingPath
+[start2, goal2, interceptPoint] = generateInterceptingPathRobotarium(start1, goal1, x_bound, y_bound, safe_distance);
 
-% Convert to Robotarium coordinates (centered at origin)
-robotarium_offset = [r.boundaries(2)/2; r.boundaries(4)/2];
-start1_r = start1' - test_site_size/2;
-start2_r = start2' - test_site_size/2;
-goal1_r = goal1' - test_site_size/2;
-goal2_r = goal2' - test_site_size/2;
+goal_all = [goal1, goal2];
+
+% No conversion needed - already in Robotarium coordinates
+start1_r = start1;
+start2_r = start2;
+goal1_r = goal1;
+goal2_r = goal2;
 
 % Set initial conditions
 initial_conditions = [start1_r, start2_r; zeros(1, N)];
-r.set_poses(initial_conditions);
+
+% Initialize Robotarium with initial conditions
+r = Robotarium('NumberOfRobots', N, 'ShowFigure', true, 'InitialConditions', initial_conditions);
 
 % Initialize pose history for plotting
 pose_history = zeros(3, N, iterations);
@@ -67,22 +77,15 @@ for t = 1:iterations
         % Current position and orientation
         current_pos = x(1:2, i);
         current_theta = x(3, i);
-        
-        % Goal for this robot
-        if i == 1
-            goal = goal1_r;
-            rep_factor = repulsion_factors(1);
-        else
-            goal = goal2_r;
-            rep_factor = repulsion_factors(2);
-        end
+
+        goal = goal_all(:,i);
         
         % Find other robots (obstacles)
         obstacles = x(1:2, setdiff(1:N, i));
         
         % Calculate APF forces
         [F_att, F_rep] = calculate_apf_forces(current_pos, goal, obstacles, ...
-            detection_radius, attraction_factor, rep_factor);
+            detection_radius, attraction_factor, repulsion_factor);
         
         % Combined force
         F_total = F_att + F_rep;
@@ -101,8 +104,8 @@ for t = 1:iterations
         theta_error = atan2(sin(theta_error), cos(theta_error));
         
         % Set velocities (linear and angular)
-        v = 1; % Linear velocity matching original
-        w = 4 * theta_error; % P controller for angular velocity
+        v = 0.1; % Linear velocity scaled for Robotarium
+        w = 2 * theta_error; % P controller for angular velocity
         
         dxu(:, i) = [v; w];
     end
@@ -111,10 +114,10 @@ for t = 1:iterations
     r.set_velocities(1:N, dxu);
     r.step();
     
-    % Check if robots reached goals
-    x_current = r.get_poses();
-    dist1 = norm(x_current(1:2, 1) - goal1_r);
-    dist2 = norm(x_current(1:2, 2) - goal2_r);
+    % Check if robots reached goals using current poses
+    dist1 = norm(x(1:2, 1) - goal1_r);
+    dist2 = norm(x(1:2, 2) - goal2_r);
+    pause(0.01)
     
     if dist1 < goal_radius || dist2 < goal_radius
         break;
@@ -145,6 +148,7 @@ plot(goal2_r(1), goal2_r(2), 'kp', 'MarkerSize', 10, 'MarkerFaceColor', 'b');
 legend('Robot 1 Trajectory', 'Robot 2 Trajectory', ...
     'Robot 1 Start', 'Robot 1 Goal', 'Robot 2 Start', 'Robot 2 Goal');
 axis equal;
+axis([-1.6 1.6 -1 1]);  % Set axis to match Robotarium boundaries
 grid on;
 xlabel('X (m)');
 ylabel('Y (m)');
@@ -174,49 +178,116 @@ function [F_att, F_rep] = calculate_apf_forces(current_pos, goal, obstacles, ...
     end
 end
 
-function goal = generateRandomGoal(start, distance, test_site_size)
-    % Generate a random goal at specified distance from start
-    while true
-        x = rand() * test_site_size;
-        y = rand() * test_site_size;
-        
-        if sqrt((x - start(1))^2 + (y - start(2))^2) > distance
-            goal = [x; y];
-            break;
-        end
+function F_boundary = calculate_boundary_forces(current_pos, x_bound, y_bound)
+    % Calculate repulsive forces from boundaries to keep robot within arena
+    F_boundary = zeros(2, 1);
+    
+    % Boundary detection distance
+    boundary_threshold = 0.2;  % Start repulsion when within 20cm of boundary
+    boundary_strength = 2.0;   % Boundary repulsion strength
+    
+    x = current_pos(1);
+    y = current_pos(2);
+    
+    % Left boundary (x = -x_bound)
+    dist_left = x - (-x_bound);
+    if dist_left < boundary_threshold && dist_left > 0
+        F_boundary(1) = F_boundary(1) + boundary_strength * (1/dist_left - 1/boundary_threshold) / dist_left^2;
+    end
+    
+    % Right boundary (x = x_bound)
+    dist_right = x_bound - x;
+    if dist_right < boundary_threshold && dist_right > 0
+        F_boundary(1) = F_boundary(1) - boundary_strength * (1/dist_right - 1/boundary_threshold) / dist_right^2;
+    end
+    
+    % Bottom boundary (y = -y_bound)
+    dist_bottom = y - (-y_bound);
+    if dist_bottom < boundary_threshold && dist_bottom > 0
+        F_boundary(2) = F_boundary(2) + boundary_strength * (1/dist_bottom - 1/boundary_threshold) / dist_bottom^2;
+    end
+    
+    % Top boundary (y = y_bound)
+    dist_top = y_bound - y;
+    if dist_top < boundary_threshold && dist_top > 0
+        F_boundary(2) = F_boundary(2) - boundary_strength * (1/dist_top - 1/boundary_threshold) / dist_top^2;
     end
 end
 
-function [newStart, newGoal] = generateInterceptingPath(refStart, refGoal, ...
-    test_site_size, safeRadius)
-    % Generate an intercepting path for the second robot
-    while true
-        dir2 = refGoal - refStart';
-        t = rand() * 0.5;
+function [newStart, newGoal, interceptPoint] = generateInterceptingPathRobotarium(refStart, refGoal, x_bound, y_bound, safeRadius)
+    % Generate intercepting path for Robot 2 based on Robot 1's path
+    % Adapted from generateInterceptingPath.m for Robotarium coordinates
+    
+    max_attempts = 100;
+    attempt = 0;
+    
+    while attempt < max_attempts
+        attempt = attempt + 1;
         
-        interceptPoint = refStart' + t * dir2;
+        % Direction from start to goal
+        dir = refGoal - refStart;
         
-        if all(interceptPoint <= test_site_size) && all(interceptPoint >= 0)
-            distance = norm(interceptPoint - refStart');
+        % Random point along the path (30-70% of the way)
+        t = 0.3 + rand() * 0.4;
+        interceptPoint = refStart + t * dir;
+        
+        % Check if intercept point is within bounds
+        if interceptPoint(1) >= -x_bound && interceptPoint(1) <= x_bound && ...
+           interceptPoint(2) >= -y_bound && interceptPoint(2) <= y_bound
             
-            % Generate random point on circle
-            theta = 2 * pi * rand();
-            newStart = interceptPoint + distance * [cos(theta); sin(theta)];
+            % Distance from intercept point to robot 1 start
+            distance = norm(interceptPoint - refStart);
             
-            % Check if within bounds
-            if all(newStart >= 0) && all(newStart <= test_site_size)
-                if norm(newStart - refStart') > safeRadius
-                    dir3 = interceptPoint - newStart;
-                    newGoal = interceptPoint + dir3;
-                    
-                    % Ensure goal is within bounds
-                    newGoal = max(0, min(test_site_size, newGoal));
-                    break;
+            % Generate start position for robot 2 on circle around intercept point
+            newStart = generateRandomPointOnCircleRobotarium(interceptPoint, distance, x_bound, y_bound);
+            
+            % Check if new start is far enough from robot 1 start
+            if norm(newStart - refStart) > safeRadius
+                % Goal is on opposite side of intercept point
+                dir_to_goal = interceptPoint - newStart;
+                newGoal = interceptPoint + dir_to_goal;
+                
+                % Ensure goal is within bounds
+                newGoal(1) = max(-x_bound, min(x_bound, newGoal(1)));
+                newGoal(2) = max(-y_bound, min(y_bound, newGoal(2)));
+                
+                % Verify the paths will actually intersect
+                if norm(newGoal - interceptPoint) > 0.1  % Goal is reasonably far from intercept
+                    return;
                 end
             end
         end
     end
     
-    newStart = newStart';
-    newGoal = newGoal';
+    % Fallback: simple crossing paths
+    newStart = [-refStart(1); -refStart(2)];  % Opposite quadrant
+    newGoal = [-refGoal(1); -refGoal(2)];     % Opposite goal
+    interceptPoint = (refStart + refGoal) / 2; % Midpoint
+end
+
+function point = generateRandomPointOnCircleRobotarium(center, radius, x_bound, y_bound)
+    % Generate random point on circle that's within Robotarium bounds
+    
+    max_attempts = 50;
+    attempt = 0;
+    
+    while attempt < max_attempts
+        attempt = attempt + 1;
+        
+        % Generate random angle
+        theta = 2 * pi * rand();
+        
+        % Calculate point on circle
+        x = center(1) + radius * cos(theta);
+        y = center(2) + radius * sin(theta);
+        
+        % Check if point is within bounds
+        if x >= -x_bound && x <= x_bound && y >= -y_bound && y <= y_bound
+            point = [x; y];
+            return;
+        end
+    end
+    
+    % Fallback: return a point that's definitely within bounds
+    point = [(rand()*2-1)*x_bound*0.8; (rand()*2-1)*y_bound*0.8];
 end

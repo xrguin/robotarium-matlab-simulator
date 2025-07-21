@@ -3,6 +3,10 @@
 % in the simulator.  Also, DO NOT SUBMIT THIS FILE WITH YOUR EXPERIMENT OR
 % CALL IT IN YOUR SCRIPTS.  All of these utilities will be automatically
 % included in your experiment!
+clc
+clear
+close all
+
 
 path = genpath('utilities');
 if(isempty(path))

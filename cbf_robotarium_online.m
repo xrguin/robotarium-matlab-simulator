@@ -1,9 +1,8 @@
 %% Control Barrier Function (CBF) Obstacle Avoidance - Robotarium Online Version
 % This script demonstrates CBF-based navigation for real Robotarium deployment
 % Adapted for online web interface with data saving capabilities
-
+init
 %% TUNABLE PARAMETERS
-
 % === CBF Parameters ===
 gamma_cbf = 2.0;                % CBF conservativeness (higher = more conservative)
 activation_distance = 0.8;      % Distance to activate CBF constraints (m)
@@ -22,19 +21,38 @@ heading_gain = 4.0;             % P-gain for angular velocity control
 heading_smooth_factor = 0.7;    % Heading smoothing (0-1, higher = smoother)
 linear_velocity_gain = 1.0;     % Scaling for linear velocity
 
+% === Deadlock Resolution Parameters ===
+enable_deadlock_resolution = true;  % Enable perturbation-based deadlock resolution
+deadlock_detection_time = 1.5;      % Time of low movement before applying perturbation (s)
+deadlock_movement_threshold = 0.03; % Movement threshold for deadlock detection (m/s)
+perturbation_magnitude = 0.03;      % Magnitude of random perturbation (m/s)
+perturbation_duration = 1.0;        % How long to apply perturbation (s)
+perturbation_cooldown = 2.0;        % Cooldown before next perturbation (s)
+
 % === Monitoring Parameters ===
 monitor_velocity_violations = true; % Track velocity limit violations
-velocity_safety_margin = 0.02;     % Safety margin for velocity limits (m/s)
+velocity_safety_margin = 0.01;     % Safety margin for velocity limits (m/s)
+
+% === Visualization Parameters (Arena Projection) ===
+enable_visualization = true;     % Master switch for all visualization
+show_safety_circles = true;     % Show safety margins around robots
+show_detection_range = true;    % Show CBF activation range
+show_trajectories = true;       % Show real-time trajectory trails
+show_intended_paths = true;     % Show dashed lines for intended paths
+trajectory_fade_time = 5.0;     % Time for trajectory trails to fade (seconds)
+trajectory_max_points = 150;    % Maximum points to keep in trajectory trail
+update_frequency = 15;           % Update visualization every N iterations (higher = faster)
 
 %% ROBOTARIUM SETUP
 
 % === Robot Configuration ===
 N = 2; % Number of robots
-max_linear_velocity = 0.15;     % Conservative limit for online platform (3/4 of 0.2)
+max_linear_velocity = 0.1;     % Conservative limit for online platform (3/4 of 0.2)
 max_angular_velocity = 2*pi;    % Conservative angular limit
 boundaries = [-1.6, 1.6, -1, 1]; % Robotarium arena bounds
 
 % === Simulation Parameters ===
+sampleTime = 0.033;             % Robotarium sample time (30 Hz)
 iterations = 2000;              % Maximum iterations (adjust for desired runtime)
 goal_radius = 0.1;              % Distance to consider goal reached
 
@@ -90,6 +108,50 @@ initial_conditions = [start1, start2; initial_heading1, initial_heading2];
 % Create Robotarium instance
 r = Robotarium('NumberOfRobots', N, 'ShowFigure', true, 'InitialConditions', initial_conditions);
 
+%% VISUALIZATION SETUP FOR ARENA PROJECTION
+
+% Get figure handle for arena projections
+figure_handle = r.figure_handle;
+hold on;
+
+% Colors for robots (green and blue with transparency)
+robot_colors = {[0, 1, 0], [0, 0, 1]};
+colors_rgb = [0, 1, 0; 0, 0, 1]; % For trajectory storage
+
+% Initialize trajectory storage
+if show_trajectories
+    trajectory_points = cell(N, 1);
+    trajectory_times = cell(N, 1);
+    trajectory_handles = cell(N, 1);
+    for i = 1:N
+        trajectory_points{i} = [];
+        trajectory_times{i} = [];
+        trajectory_handles{i} = [];
+    end
+end
+
+% Plot intended paths if enabled
+if show_intended_paths
+    plot([start1(1), goal1(1)], [start1(2), goal1(2)], '--', ...
+        'Color', [robot_colors{1}, 0.5], 'LineWidth', 2);
+    plot([start2(1), goal2(1)], [start2(2), goal2(2)], '--', ...
+        'Color', [robot_colors{2}, 0.5], 'LineWidth', 2);
+end
+
+% Plot start and goal markers
+plot(start1(1), start1(2), 'o', 'Color', robot_colors{1}, ...
+    'MarkerSize', 12, 'MarkerFaceColor', robot_colors{1});
+plot(goal1(1), goal1(2), 'p', 'Color', robot_colors{1}, ...
+    'MarkerSize', 15, 'MarkerFaceColor', robot_colors{1});
+plot(start2(1), start2(2), 'o', 'Color', robot_colors{2}, ...
+    'MarkerSize', 12, 'MarkerFaceColor', robot_colors{2});
+plot(goal2(1), goal2(2), 'p', 'Color', robot_colors{2}, ...
+    'MarkerSize', 15, 'MarkerFaceColor', robot_colors{2});
+
+% Initialize handles for dynamic elements
+safety_circle_handles = gobjects(N, 1);
+detection_circle_handles = gobjects(N, 1);
+
 %% DATA COLLECTION SETUP
 
 % Initialize data storage
@@ -110,6 +172,14 @@ path_end_time = zeros(N, 1);
 straight_line_distance = [norm(goal1 - start1); norm(goal2 - start2)];
 total_distance_traveled = zeros(N, 1);
 last_positions = initial_conditions(1:2, :);
+
+% Deadlock resolution state
+deadlock_timer = zeros(N, 1);          % Time each robot has been moving slowly
+perturbation_active = false(N, 1);     % Whether perturbation is active
+perturbation_start_time = zeros(N, 1); % When perturbation started
+perturbation_direction = zeros(2, N);  % Random perturbation direction
+last_perturbation_time = zeros(N, 1);  % For cooldown tracking
+velocity_history_short = zeros(N, 10); % Short history for average velocity
 
 % Velocity violation tracking
 if monitor_velocity_violations
@@ -188,6 +258,52 @@ for t = 1:iterations
             u_safe = u_desired;
         end
         
+        % Deadlock detection and resolution
+        if enable_deadlock_resolution && distance_to_goal > goal_radius
+            % Update velocity history
+            current_velocity = norm(u_safe);
+            velocity_history_short(i, :) = [current_velocity, velocity_history_short(i, 1:end-1)];
+            avg_velocity = mean(velocity_history_short(i, :));
+            
+            % Check if in deadlock (low average velocity)
+            if avg_velocity < deadlock_movement_threshold && pose_idx > 10
+                deadlock_timer(i) = deadlock_timer(i) + sampleTime;
+                
+                % Apply perturbation if deadlock persists and cooldown passed
+                if deadlock_timer(i) > deadlock_detection_time && ...
+                   (current_time - last_perturbation_time(i)) > perturbation_cooldown
+                    
+                    if ~perturbation_active(i)
+                        % Start new perturbation
+                        perturbation_active(i) = true;
+                        perturbation_start_time(i) = current_time;
+                        
+                        % Random perpendicular direction
+                        angle = atan2(u_safe(2), u_safe(1)) + (rand()-0.5)*pi;
+                        perturbation_direction(:, i) = perturbation_magnitude * [cos(angle); sin(angle)];
+                        
+                        fprintf('Robot %d: Applying deadlock perturbation at %.1fs\n', i, current_time);
+                    end
+                end
+            else
+                % Reset deadlock timer if moving well
+                deadlock_timer(i) = 0;
+            end
+            
+            % Apply perturbation if active
+            if perturbation_active(i)
+                if (current_time - perturbation_start_time(i)) < perturbation_duration
+                    % Add perturbation to safe velocity
+                    u_safe = u_safe + perturbation_direction(:, i);
+                else
+                    % End perturbation
+                    perturbation_active(i) = false;
+                    last_perturbation_time(i) = current_time;
+                    deadlock_timer(i) = 0;
+                end
+            end
+        end
+        
         % Convert to unicycle control
         if norm(u_safe) > 0.01
             desired_heading = atan2(u_safe(2), u_safe(1));
@@ -240,9 +356,14 @@ for t = 1:iterations
         velocity_history(:, i, pose_idx) = [v; omega];
     end
     
+    % Update arena projections (with frequency control)
+    if enable_visualization && mod(t-1, update_frequency) == 0
+        updateArenaProjections(x, current_time);
+    end
+    
     % Robotarium velocity thresholding (critical for online platform)
     norms = arrayfun(@(x) norm(dxu(:, x)), 1:N);
-    threshold = 3/4 * r.max_linear_velocity;  % Robotarium requirement
+    threshold = r.max_linear_velocity;  % Robotarium requirement
     to_thresh = norms > threshold;
     dxu(:, to_thresh) = threshold * dxu(:, to_thresh) ./ norms(to_thresh);
     
@@ -303,6 +424,135 @@ end
 
 % Required Robotarium debug call
 r.debug();
+
+%% ARENA PROJECTION FUNCTION
+
+function updateArenaProjections(current_poses, current_time)
+    % Update visual elements projected on the arena floor
+    % Access variables from parent workspace
+    
+    N = evalin('caller', 'N');
+    show_safety_circles = evalin('caller', 'show_safety_circles');
+    show_detection_range = evalin('caller', 'show_detection_range');
+    show_trajectories = evalin('caller', 'show_trajectories');
+    safety_margin_robots = evalin('caller', 'safety_margin_robots');
+    activation_distance = evalin('caller', 'activation_distance');
+    robot_colors = evalin('caller', 'robot_colors');
+    cbf_active_history = evalin('caller', 'cbf_active_history');
+    pose_idx = evalin('caller', 'pose_idx');
+    
+    % Get handle arrays
+    safety_circle_handles = evalin('caller', 'safety_circle_handles');
+    detection_circle_handles = evalin('caller', 'detection_circle_handles');
+    
+    % Circle parameters for smooth circles
+    theta_circle = linspace(0, 2*pi, 30);
+    
+    % Update safety circles and detection ranges
+    for i = 1:N
+        pos = current_poses(1:2, i);
+        color = robot_colors{i};
+        
+        % Delete previous circles
+        if isvalid(safety_circle_handles(i))
+            delete(safety_circle_handles(i));
+        end
+        if isvalid(detection_circle_handles(i))
+            delete(detection_circle_handles(i));
+        end
+        
+        % Draw safety circle
+        if show_safety_circles
+            safety_circle_x = pos(1) + safety_margin_robots * cos(theta_circle);
+            safety_circle_y = pos(2) + safety_margin_robots * sin(theta_circle);
+            h_safety = fill(safety_circle_x, safety_circle_y, color, ...
+                'FaceAlpha', 0.1, 'EdgeColor', color, 'LineWidth', 2);
+            safety_circle_handles(i) = h_safety;
+        end
+        
+        % Draw detection range when CBF is active
+        if show_detection_range && pose_idx > 0 && cbf_active_history(i, pose_idx)
+            detection_circle_x = pos(1) + activation_distance * cos(theta_circle);
+            detection_circle_y = pos(2) + activation_distance * sin(theta_circle);
+            h_detection = plot(detection_circle_x, detection_circle_y, '--', ...
+                'Color', color, 'LineWidth', 1.5);
+            detection_circle_handles(i) = h_detection;
+        end
+    end
+    
+    % Update handle arrays in caller workspace
+    assignin('caller', 'safety_circle_handles', safety_circle_handles);
+    assignin('caller', 'detection_circle_handles', detection_circle_handles);
+    
+    % Update trajectory trails
+    if show_trajectories
+        trajectory_fade_time = evalin('caller', 'trajectory_fade_time');
+        trajectory_max_points = evalin('caller', 'trajectory_max_points');
+        
+        % Get all trajectory data at once
+        trajectory_points = evalin('caller', 'trajectory_points');
+        trajectory_times = evalin('caller', 'trajectory_times');
+        trajectory_handles = evalin('caller', 'trajectory_handles');
+        
+        for i = 1:N
+            pos = current_poses(1:2, i);
+            color = robot_colors{i};
+            
+            % Get trajectory data for this robot
+            traj_points = trajectory_points{i};
+            traj_times = trajectory_times{i};
+            traj_handles = trajectory_handles{i};
+            
+            % Add new point
+            traj_points = [traj_points, pos];
+            traj_times = [traj_times, current_time];
+            
+            % Remove old points (beyond fade time or max points)
+            keep_idx = (current_time - traj_times) <= trajectory_fade_time;
+            if sum(keep_idx) > trajectory_max_points
+                keep_idx = false(size(keep_idx));
+                keep_idx(end-trajectory_max_points+1:end) = true;
+            end
+            
+            traj_points = traj_points(:, keep_idx);
+            traj_times = traj_times(keep_idx);
+            
+            % Delete old trajectory handle
+            if ~isempty(traj_handles) && isvalid(traj_handles)
+                delete(traj_handles);
+            end
+            
+            % Draw new trajectory with fading effect
+            if size(traj_points, 2) > 1
+                % Calculate alpha values based on time
+                alphas = 1 - (current_time - traj_times) / trajectory_fade_time;
+                alphas = max(0.1, alphas); % Minimum visibility
+                
+                % Draw trajectory segments with varying opacity
+                for j = 1:size(traj_points, 2)-1
+                    alpha = alphas(j);
+                    plot(traj_points(1, j:j+1), traj_points(2, j:j+1), '-', ...
+                        'Color', [color, alpha], 'LineWidth', 3);
+                end
+                
+                % Store handle of last segment for deletion next time
+                h_traj = plot(traj_points(1, end-1:end), traj_points(2, end-1:end), '-', ...
+                    'Color', color, 'LineWidth', 3);
+                traj_handles = h_traj;
+            end
+            
+            % Update cell arrays
+            trajectory_points{i} = traj_points;
+            trajectory_times{i} = traj_times;
+            trajectory_handles{i} = traj_handles;
+        end
+        
+        % Update all trajectory data in caller workspace
+        assignin('caller', 'trajectory_points', trajectory_points);
+        assignin('caller', 'trajectory_times', trajectory_times);
+        assignin('caller', 'trajectory_handles', trajectory_handles);
+    end
+end
 
 %% HELPER FUNCTIONS
 

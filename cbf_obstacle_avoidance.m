@@ -25,7 +25,7 @@ heading_smooth_factor = 0.7;    % Heading smoothing (0-1, higher = smoother)
 linear_velocity_gain = 1.0;     % Scaling for linear velocity
 
 % === Stuck Detection Parameters ===
-max_time_at_position = 3.0;     % Time before robot considered stuck (s)
+max_time_at_position = 5.0;     % Time before robot considered stuck (s)
 position_threshold = 0.05;      % Movement threshold to detect stuck (m)
 distance_tracking_threshold = 0.001; % Minimum movement to track for efficiency (m)
 
@@ -43,7 +43,7 @@ show_intended_paths = true;     % Show dashed lines for intended paths
 
 % === Robotarium Constants ===
 N = 2; % Number of robots
-max_linear_velocity = 0.2;      % From ARobotarium.m
+max_linear_velocity = 0.1;      % From ARobotarium.m
 max_angular_velocity = 2*pi;    % Conservative limit
 robot_diameter = 0.11;
 collision_diameter = 0.135;

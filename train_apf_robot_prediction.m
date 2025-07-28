@@ -13,7 +13,7 @@ newShuffle = true;
 %% Load and Prepare Data
 
 % Load the APF turning data
-load(['apf_robotarium_simulation.mat'], 'apf_constant_vel_data', 'apf_full_data');
+load('apf_robotarium_simulation.mat', 'apf_constant_vel_data', 'apf_full_data');
 
 % apf_constant_vel_data format: {trial, robot} where each cell contains
 % turning trajectory as [x; y; theta; omega] (4×N matrix)

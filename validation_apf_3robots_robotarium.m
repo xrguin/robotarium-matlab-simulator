@@ -137,7 +137,56 @@ for n = 1:samples
     
     % Robot 1 (ego) - generate using specific algorithm from ValidationEnvironment_APF
     [start1, goal1] = generateEgoRobotPath(start2, start3, interceptPoint, x_bound_gen, y_bound_gen, safe_radius);
-    
+
+    %% Demo locations
+
+    % % Case 1
+    % start1 = [0.8459; 0.1178];
+    % start2 = [0.7217; -0.1616];
+    % start3 = [-0.3249; 0.2225];
+    % 
+    % goal1 = [-0.3207; 0.2930];
+    % goal2 = [-0.1059; 0.5];
+    % goal3 = [0.8501; 0.1883];
+
+    % % Case 2
+    % start1 = [-0.184; 0.3814];
+    % start2 = [-0.2577; -0.431];
+    % start3 = [-0.9982; 0.3316];
+    % 
+    % goal1 = [-1.0449; -0.4546];
+    % goal2 = [-1.1; 0.5];
+    % goal3 = [-0.2307; -0.4048];
+
+
+    % % Case 3
+    % start1 = [-0.7089; 0.1985];
+    % start2 = [-0.4427; -0.3860];
+    % start3 = [0.7137; 0.4862];
+    % 
+    % goal1 = [1.0366; -0.1734];
+    % goal2 = [0.9057; 0.5];
+    % goal3 = [-0.386; -0.4611];
+    % 
+    % % Case 4
+    % start1 = [0.4144; -0.414];
+    % start2 = [0.3554; -0.0213];
+    % start3 = [-0.6736; -0.376];
+    % 
+    % goal1 = [-0.7795; 0.0369];
+    % goal2 = [-0.6093; -0.3328];
+    % goal3 = [0.3485, -0.0011];
+
+    % Case 5
+    start1 = [-0.4231; -0.4558];
+    start2 = [-1.0281; -0.3617];
+    start3 = [-0.051; 0.0305];
+
+    goal1 = [-0.874; 0.5];
+    goal2 = [-0.3175; 0.5];
+    goal3 = [-1.1; 0.1715];
+
+    %%
     % Calculate initial headings
     heading1 = atan2(goal1(2) - start1(2), goal1(1) - start1(1));
     heading2 = atan2(goal2(2) - start2(2), goal2(1) - start2(1));

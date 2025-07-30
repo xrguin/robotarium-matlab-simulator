@@ -1,2 +1,4 @@
 *.mat
 apf_constant_velocity_turn_only.mat
+!apf_robot2_predictor_*.mat
+!validation_results_*.mat

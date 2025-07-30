@@ -13,7 +13,7 @@ newShuffle = true;
 %% Load and Prepare Data
 
 % Load the APF turning data
-load(['apf_robotarium_simulation.mat'], 'apf_constant_vel_data', 'apf_full_data');
+load('apf_robotarium_simulation.mat', 'apf_constant_vel_data', 'apf_full_data');
 
 % apf_constant_vel_data format: {trial, robot} where each cell contains
 % turning trajectory as [x; y; theta; omega] (4×N matrix)
@@ -30,6 +30,7 @@ for i = 1:size(apf_constant_vel_data, 1)
 end
 
 numObservations = size(raw_data, 1);
+numObservations = 2000;
 fprintf('Total number of trials: %d\n', numObservations);
 
 %% Plot a Few Sample Trajectories
@@ -88,36 +89,54 @@ end
 validTrajectories = raw_data(isValid, :);
 fprintf('Valid trajectories with length > %d: %d\n', minLength, size(validTrajectories, 1));
 
-%% Create Sliding Window Dataset
+%% Split trajectories for training and full trajectory testing
 
-windowSize = 10; % Use 10 timesteps of robot 1 data to predict robot 2
+% Take 5% of complete trajectories for full trajectory testing
+numTrajectories = size(validTrajectories, 1);
+numTestTrajectories = ceil(0.05 * numTrajectories);
+
+% Randomly select test trajectory indices
+testTrajIndices = randperm(numTrajectories, numTestTrajectories);
+trainTrajIndices = setdiff(1:numTrajectories, testTrajIndices);
+
+% Store test trajectories for later evaluation
+testTrajectories = validTrajectories(testTrajIndices, :);
+trainTrajectories = validTrajectories(trainTrajIndices, :);
+
+fprintf('Using %d trajectories for training, %d for full trajectory testing\n', ...
+    length(trainTrajIndices), length(testTrajIndices));
+
+%% Create Sliding Window Dataset from Training Trajectories
+
+offset = 29; % Same as APF_Training_10.m
+windowSize = offset + 1; % Total window size is 10
 XAll = {}; % Input: Robot 1 trajectory windows
 TAll = {}; % Target: Robot 2 position at next timestep
 allData = {};
 k = 1; % Index for storing valid windows
 
-for n = 1:size(validTrajectories, 1)
-    robot1_data = validTrajectories{n, 1};
-    robot2_data = validTrajectories{n, 2};
+for n = 1:size(trainTrajectories, 1)
+    robot1_data = trainTrajectories{n, 1};
+    robot2_data = trainTrajectories{n, 2};
     
     % Ensure we have synchronized data
     minLen = min(size(robot1_data, 1), size(robot2_data, 1));
     
     % Create sliding windows
-    numWindows = minLen - windowSize - 1;
+    numWindows = minLen - offset - 1;
     
     for t = 1:numWindows
-        % Extract window of robot 1 data (10 timesteps)
-        robot1_window = robot1_data(t:t+windowSize-1, :); % All 4 features
-        
-        % Check if window contains actual turning (non-zero angular velocities)
-        angular_velocities = robot1_window(:, 4);
-        if any(abs(angular_velocities) > 0.1) % At least some turning in the window
+        % Check if all elements in the window have non-zero angular velocity
+        windowLastColumn = robot1_data(t:t+offset, 4); % Angular velocity column
+        if all(abs(windowLastColumn) > 0.001) % Only use turning windows
+            % Extract window of robot 1 data (10 timesteps, x,y,theta)
+            robot1_window = robot1_data(t:t+offset, 1:3);
+            
             % Input: Robot 1 trajectory over window
             XAll{k, 1} = robot1_window;
             
             % Target: Robot 2 position at next timestep
-            TAll{k, 1} = robot2_data(t+windowSize, 1:2); % Only x,y position
+            TAll{k, 1} = robot2_data(t+offset+1, 1:2); % Only x,y position
             
             % Store together for shuffling
             allData{k, 1} = XAll{k, 1};
@@ -198,24 +217,25 @@ for n = 1:numel(XTest)
 end
 
 %% Define and Train the Network
-
-numChannels = 4; % x, y, theta, omega for robot 1
+gpuDevice(1);
+reset(gpuDevice);
+numChannels = 3; % x, y, theta, omega for robot 1
 numOutputs = 2;  % x, y for robot 2
 
 if doTrain
     % Define LSTM network architecture (similar to APF_Training_10.m)
     layers = [...
         sequenceInputLayer(numChannels)
-        lstmLayer(32, 'OutputMode', 'sequence')
+        lstmLayer(64, 'OutputMode', 'sequence')
         dropoutLayer(0.2)
-        lstmLayer(128, 'OutputMode', 'last')
+        lstmLayer(256, 'OutputMode', 'last')
         fullyConnectedLayer(numOutputs)
         ];
     
-    % Training options
+    % Training options (same as APF_Training_10.m)
     options = trainingOptions('adam', ...
-        'ExecutionEnvironment', 'auto', ... % Use 'gpu' if available
-        'MaxEpochs', 300, ...
+        'ExecutionEnvironment', 'gpu', ...
+        'MaxEpochs', 500, ...
         'MiniBatchSize', 128, ...
         'InitialLearnRate', 0.001, ...
         'LearnRateSchedule', 'piecewise', ...
@@ -228,21 +248,32 @@ if doTrain
         'Plots', 'training-progress', ...
         'ValidationData', {XVal_norm, TVal_norm}, ...
         'ValidationFrequency', 50, ...
-        'ValidationPatience', 20);
+        'ValidationPatience', 1000, ...
+        'CheckpointPath', pwd, ...
+        'OutputFcn', @customTrainingMonitor);
     
     % Train the network
     fprintf('\nTraining LSTM network...\n');
     net_apf_robot_prediction = trainnet(XTrain_norm, TTrain_norm, layers, 'mse', options);
     
-    % Save trained model and normalization parameters
+    % Create structure to store network and training data
     trainedModel = struct();
     trainedModel.net = net_apf_robot_prediction;
-    trainedModel.muX = muX_train;
-    trainedModel.sigmaX = sigmaX_train;
-    trainedModel.muT = muT_train;
-    trainedModel.sigmaT = sigmaT_train;
-    trainedModel.windowSize = windowSize;
-    trainedModel.trainingDate = todayDate;
+    trainedModel.normParams = struct();
+    trainedModel.normParams.muX = muX_train;
+    trainedModel.normParams.sigmaX = sigmaX_train;
+    trainedModel.normParams.muT = muT_train;
+    trainedModel.normParams.sigmaT = sigmaT_train;
+    trainedModel.trainingInfo = struct();
+    trainedModel.trainingInfo.offset = offset;
+    trainedModel.trainingInfo.windowSize = windowSize;
+    trainedModel.trainingInfo.numChannels = numChannels;
+    trainedModel.trainingInfo.numOutputs = numOutputs;
+    trainedModel.trainingInfo.trainDate = todayDate;
+    trainedModel.trainingInfo.dataSize = struct();
+    trainedModel.trainingInfo.dataSize.train = numel(XTrain);
+    trainedModel.trainingInfo.dataSize.val = numel(XVal);
+    trainedModel.trainingInfo.dataSize.test = numel(XTest);
     
     save(sprintf('apf_robot2_predictor_%s.mat', todayDate), 'trainedModel');
     fprintf('\nModel saved to: apf_robot2_predictor_%s.mat\n', todayDate);
@@ -252,7 +283,10 @@ end
 
 if exist('net_apf_robot_prediction', 'var')
     % Predict on test set
-    YTest_norm = predict(net_apf_robot_prediction, XTest_norm);
+    YTest_norm = zeros(numel(XTest_norm), numOutputs);
+    for i = 1:numel(XTest_norm)
+        YTest_norm(i,:) = predict(net_apf_robot_prediction, XTest_norm{i});
+    end
     
     % Denormalize predictions
     YTest = YTest_norm .* sigmaT_train + muT_train;
@@ -308,4 +342,161 @@ if exist('net_apf_robot_prediction', 'var')
     fprintf('Median Error: %.4f m\n', median(errors));
 end
 
+%% Evaluate on Full Test Trajectories
+load("apf_robot2_predictor_2025-07-28.mat","trainedModel")
+net_apf_robot_prediction = trainedModel.net;
+muX_train = trainedModel.normParams.muX;
+sigmaX_train = trainedModel.normParams.sigmaX;
+muT_train = trainedModel.normParams.muT;
+sigmaT_train = trainedModel.normParams.sigmaT;
+offset = 29;
+if exist('net_apf_robot_prediction', 'var') && ~isempty(testTrajectories)
+    fprintf('\n===== Evaluating on Full Test Trajectories =====\n');
+    
+    % Select first test trajectory for detailed visualization
+    testIdx = 59;
+    testTrajectory = testTrajectories(testIdx, :);
+    robot1_test = testTrajectory{1};
+    robot2_test = testTrajectory{2};
+    
+    numTimeSteps = size(robot1_test, 1);
+    numPredictionTimeSteps = numTimeSteps - offset - 1;
+    
+    Y_pred = nan(numPredictionTimeSteps, 2);
+    Y_filter = nan(size(Y_pred)); % Filtered predictions
+    
+    % FILO filter parameters
+    filo_length = 5;
+    buffer = zeros(filo_length, 2);
+    
+    % Reset network state before trajectory prediction
+    net_apf_robot_prediction.resetState();
+    
+    for t = 1:numPredictionTimeSteps
+        % Extract window
+        Xwindow = robot1_test(t:t+offset, 1:3);
+        
+        % Normalize input
+        Xwindow_norm = (Xwindow - muX_train) ./ sigmaX_train;
+        
+        % Predict
+        Y_norm = predict(net_apf_robot_prediction, Xwindow_norm);
+        
+        % Denormalize
+        Y_pred(t, :) = Y_norm .* sigmaT_train + muT_train;
+        
+        % Apply FILO filter
+        if t <= filo_length
+            buffer(t, :) = Y_pred(t, :);
+            Y_filter(t, :) = mean(buffer(1:t, :), 1);
+        else
+            buffer(1:filo_length-1, :) = buffer(2:filo_length, :);
+            buffer(end, :) = Y_pred(t, :);
+            Y_filter(t, :) = mean(buffer, 1);
+        end
+        
+        % Reset network state for next prediction
+        net_apf_robot_prediction.resetState();
+    end
+    
+    % Plot full trajectory results
+    figure('Name', 'Full Trajectory Prediction');
+    
+    % Create color map for time steps
+    c = linspace(1, 10, length(Y_filter));
+    
+    % Plot trajectories
+    scatter(robot2_test(offset+2:end, 1), robot2_test(offset+2:end, 2), [], c, ...
+        'DisplayName', 'Actual Robot 2 Positions');
+    hold on;
+    
+    % Starting points
+    scatter(robot2_test(1, 1), robot2_test(1, 2), 60, 'filled', 'd', ...
+        'DisplayName', 'Robot 2 Start', 'MarkerFaceColor', [0.4940 0.1840 0.5560]);
+    scatter(robot1_test(1, 1), robot1_test(1, 2), 60, 'filled', 'd', ...
+        'DisplayName', 'Robot 1 Start', 'MarkerFaceColor', [0.8500 0.3250 0.0980]);
+    
+    % Trajectories
+    plot(robot1_test(:, 1), robot1_test(:, 2), 'Color', [0 0.4470 0.7410], ...
+        'LineWidth', 2, 'DisplayName', 'Robot 1 Trajectory');
+    plot(robot2_test(:, 1), robot2_test(:, 2), '--', ...
+        'DisplayName', 'Robot 2 Actual Trajectory');
+    
+    % Predicted positions
+    scatter(Y_filter(:, 1), Y_filter(:, 2), [], c, 'filled', ...
+        'DisplayName', 'Predicted Robot 2 Positions');
+    
+    xlabel('X (m)');
+    ylabel('Y (m)');
+    xlim([-2, 2]);
+    ylim([-1.5, 1.5]);
+    
+    colorbar;
+    colormap('parula');
+    cb = colorbar;
+    cb.Label.String = 'Prediction Steps';
+    cb.Limits = [1, 10];
+    cb.Ticks = [1, 10];
+    cb.TickLabels = {'1', num2str(numPredictionTimeSteps)};
+    
+    legend('Location', 'best');
+    grid on;
+    ax = gca;
+    ax.FontSize = 12;
+    title('Full Trajectory Prediction Results');
+    hold off;
+    
+    % Calculate trajectory prediction error
+    actual_positions = robot2_test(offset+2:offset+1+numPredictionTimeSteps, 1:2);
+    trajectory_errors = sqrt(sum((Y_filter - actual_positions).^2, 2));
+    
+    fprintf('\nFull Trajectory Results:\n');
+    fprintf('Mean Trajectory Error: %.4f m\n', mean(trajectory_errors));
+    fprintf('Max Trajectory Error: %.4f m\n', max(trajectory_errors));
+    fprintf('Final Position Error: %.4f m\n', trajectory_errors(end));
+end
+
 fprintf('\nTraining complete!\n');
+
+%% Custom Training Monitor Function
+function [stop, options] = customTrainingMonitor(trainingState, options)
+    persistent bestValidationLoss bestEpoch epochsWithoutImprovement
+    
+    % Initialize persistent variables
+    if isempty(bestValidationLoss)
+        bestValidationLoss = inf;
+        bestEpoch = 0;
+        epochsWithoutImprovement = 0;
+    end
+    
+    % Only execute during validation
+    if ~isempty(trainingState.ValidationLoss)
+        % Check current validation loss
+        if trainingState.ValidationLoss < bestValidationLoss
+            % Save best model
+            bestValidationLoss = trainingState.ValidationLoss;
+            bestEpoch = trainingState.Epoch;
+            epochsWithoutImprovement = 0;
+            
+            % Save current best model
+            save(fullfile(pwd, 'bestModelCheckpoint_apf_robot.mat'), 'trainingState');
+            fprintf('Epoch %d: New best validation loss - %.6f\n', ...
+                trainingState.Epoch, trainingState.ValidationLoss);
+        else
+            % Record epochs without improvement
+            epochsWithoutImprovement = epochsWithoutImprovement + 1;
+            fprintf('Epoch %d: Validation loss not improved (Best: %.6f, No improvement for %d epochs)\n', ...
+                trainingState.Epoch, bestValidationLoss, epochsWithoutImprovement);
+        end
+        
+        % Determine if training should stop
+        if epochsWithoutImprovement >= 1000 && bestValidationLoss < 5
+            fprintf('Early stopping triggered: Validation loss has not improved for %d epochs\n', ...
+                epochsWithoutImprovement);
+            stop = true;
+            return;
+        end
+    end
+    
+    stop = false;
+end

@@ -1,7 +1,12 @@
-%% Horizontal Narrow Corridor with Asymmetric CBF-QP in Robotarium
+%% Horizontal Narrow Corridor with Asymmetric CBF-QP in Robotarium (FIXED VERSION)
 % This script simulates two robots navigating a horizontal narrow corridor.
 % The Ally robot (green) is programmed to always yield to the Adversary
 % (blue) using an asymmetric Control Barrier Function (CBF) formulation.
+% 
+% FIXES APPLIED:
+% - Improved retreat logic with clear path-finding to corridor entrances
+% - Better retreat exit conditions
+% - Eliminated conflicting forces that caused robot to get stuck
 
 init;
 
@@ -16,6 +21,8 @@ ally_start_zone = [-1.5, -1.2];
 ally_goal_zone = [1.2, 1.5];
 adv_start_zone = [1.2, 1.5];
 adv_goal_zone = [-1.5, -1.2];
+static1 = [-1.5, 1];
+static2 = [-1.5, -1];
 y_range = [-0.8, 0.8];
 
 % === CBF-QP Parameters ===
@@ -33,7 +40,7 @@ heading_smoothing_factor = 0.7; % Smoothing factor for heading updates
 % === Simulation & Visualization ===
 simulation_time = 60;
 goal_radius = 0.1;
-record_video = false;
+record_video = true;
 
 %% SETUP: ENVIRONMENT AND ROBOTS
 
@@ -62,6 +69,7 @@ angular_velocity_history = zeros(N, iterations);
 % Retreat state for ally robot
 ally_retreat_mode = false;
 retreat_start_pos = [];
+retreat_target = [];
 
 % Previous headings for smoothing
 previous_headings = zeros(N, 1);
@@ -87,8 +95,8 @@ for i=1:N
 end
 
 if record_video
-    video_filename = 'horizontal_corridor_asymmetric_cbf.mp4';
-    video_obj = VideoWriter(video_filename, 'MPEG-4');
+    video_filename = 'horizontal_corridor_asymmetric_cbf_fixed.avi';
+    video_obj = VideoWriter(video_filename);
     video_obj.FrameRate = 30; video_obj.Quality = 100;
     open(video_obj);
 end
@@ -108,18 +116,13 @@ for t = 1:iterations
 
         goal_direction = goal - current_pos;
         dist_to_goal = norm(goal_direction);
-        avoid_direction = current_pos - dynamic_obstacles;
-        start_direction = start1 - current_pos;
-        dist_to_start = norm(start_direction);
-        obstacle1_direc = current_pos - static_obstacles(1:2,1);
-        obstacle2_direc = current_pos - static_obstacles(1:2,2);
-        dist_to_1 = norm(obstacle1_direc) ;
-        dist_to_2 = norm(obstacle2_direc);        
-        % Retreat logic for ally robot
+        
+        % IMPROVED RETREAT LOGIC for ally robot
         if i == 1  % Only ally robot retreats
             if ~isempty(dynamic_obstacles)
                 adv_pos = dynamic_obstacles(:, 1);
                 dist_to_adv = norm(current_pos - adv_pos);
+                avoid_direction = current_pos - adv_pos;
                 
                 % Check if in narrow corridor
                 in_corridor = abs(current_pos(1)) < 0.6;
@@ -131,39 +134,69 @@ for t = 1:iterations
                     if dot(to_adv, goal_direction) > 0  % Adversary is between robot and goal
                         ally_retreat_mode = true;
                         retreat_start_pos = current_pos;
+                        
+                        % FIXED: Choose retreat target based on which corridor entrance is closer
+                        corridor_left_entrance = [-1.2; 0];  % Left corridor entrance
+                        corridor_right_entrance = [1.2; 0];   % Right corridor entrance
+                        
+                        dist_to_left = norm(current_pos - corridor_left_entrance);
+                        dist_to_right = norm(current_pos - corridor_right_entrance);
+                        
+                        if dist_to_left < dist_to_right
+                            retreat_target = corridor_left_entrance;
+                        else
+                            retreat_target = corridor_right_entrance;
+                        end
+                        
+                        fprintf('Ally entering retreat mode, target: [%.2f, %.2f]\n', retreat_target(1), retreat_target(2));
                     end
                 end
                 
-                % Exit retreat mode when safe
+                % IMPROVED: Exit retreat mode when safe
                 if ally_retreat_mode
-                    % Exit if we've retreated enough OR adversary has passed
-                    retreated_distance = norm(current_pos - retreat_start_pos);
-                    adv_passed = (current_pos(1) > 0 && adv_pos(1) < -0.2) || (current_pos(1) < 0 && adv_pos(1) > 0.2);
+                    % More responsive exit conditions
+                    adv_passed = abs(current_pos(1) - adv_pos(1)) > 0.4;  % Reduced threshold
+                    safe_distance = dist_to_adv > 0.8;  % Reduced from 1.2
+                    reached_retreat_target = norm(current_pos - retreat_target) < 0.1;
                     
-                    if retreated_distance > 0.6 || adv_passed || dist_to_adv > 1.2
+                    if adv_passed || safe_distance || reached_retreat_target
                         ally_retreat_mode = false;
                         retreat_start_pos = [];
+                        retreat_target = [];
+                        fprintf('Ally exiting retreat mode\n');
                     end
                 end
             end
             
             % Set desired velocity based on mode
-           % if ally_retreat_mode 
-                % previous_pose = pose_history(1:2,1,t-1);
-                % previous_direction = previous_pose - current_pos ;
-                % dist_to_pre = norm(previous_pose);
-              %  Retreat: move away from goal
-              % if dist_to_1 >= dist_to_2
-              %    u_desired = max_linear_velocity * ((avoid_direction / dist_to_adv)+ ...
-              %         (obstacle2_direc / dist_to_2));
-              % else
-              %      u_desired = max_linear_velocity * ((avoid_direction / dist_to_adv)+ ...
-              %        (obstacle1_direc / dist_to_1));
-              % end
-            %  else
+            if ally_retreat_mode && ~isempty(retreat_target)
+                % FIXED: Clear retreat direction to specific target
+                retreat_direction = retreat_target - current_pos;
+                retreat_distance = norm(retreat_direction);
+                static1_direction = static1 - current_pos;
+                static2_direction = static2 - current_pos;
+                dist_to_1 = norm(static1_direction);
+                dist_to_2 = norm(static2_direction);
+                adv_dist_to_1 = norm(static1 - adv_pos);
+                adv_dist_to_2 = norm(static2 - adv_pos);
+
+                % if adv_dist_to_1 >= adv_dist_to_2
+                %     u_desired = max_linear_velocity * ((retreat_direction / retreat_distance) ...
+                %         + (static1_direction  / dist_to_1));
+                % else
+                %     u_desired = max_linear_velocity * ((retreat_direction / retreat_distance) ...
+                %         + (static2_direction  / dist_to_2));
+                % end
+                
+               % if retreat_distance > 0.05
+                   u_desired = max_linear_velocity * ((retreat_direction / retreat_distance));
+               % else
+               %     u_desired = [0; 0];  % Stop when reached target
+                %end
+            else
                 % Normal: move toward goal
                 u_desired = (dist_to_goal > goal_radius) * max_linear_velocity * (goal_direction / dist_to_goal);
-            %end
+            end
         else
             % Adversary always goes to goal
             u_desired = (dist_to_goal > goal_radius) * max_linear_velocity * (goal_direction / dist_to_goal);
@@ -177,10 +210,8 @@ for t = 1:iterations
             desired_heading = atan2(u_safe(2), u_safe(1));
             
             % Apply heading smoothing for ally robot
-           
-                heading_error = wrapToPi(desired_heading - current_heading);
-                previous_headings(i) = desired_heading;
-           
+            heading_error = wrapToPi(desired_heading - current_heading);
+            previous_headings(i) = desired_heading;
             
             v = norm(u_safe);
             omega = heading_gain * heading_error;
@@ -220,8 +251,7 @@ if record_video, close(video_obj); fprintf('Video saved as "%s"\n', video_filena
 r.debug();
 
 %% POST-SIMULATION ANALYSIS & PLOTTING
-% (Plotting code is unchanged)
-figure('Name', 'Simulation Results', 'Position', [100, 100, 1200, 800]);
+figure('Name', 'Simulation Results - FIXED VERSION', 'Position', [100, 100, 1200, 800]);
 subplot(2, 2, [1, 3]);
 hold on;
 plot_horizontal_corridor(gcf, passage_width, radius, center_top_y, center_bottom_y);
@@ -231,7 +261,7 @@ plot(start2(1), start2(2), 'bo', 'MarkerSize', 10, 'MarkerFaceColor', 'b', 'Disp
 plot(goal2(1), goal2(2), 'bp', 'MarkerSize', 10, 'MarkerFaceColor', 'b', 'DisplayName', 'Adversary Goal');
 plot(squeeze(pose_history(1, 1, 1:t)), squeeze(pose_history(2, 1, 1:t)), 'g-', 'LineWidth', 2, 'DisplayName', 'Ally Trajectory');
 plot(squeeze(pose_history(1, 2, 1:t)), squeeze(pose_history(2, 2, 1:t)), 'b-', 'LineWidth', 2, 'DisplayName', 'Adversary Trajectory');
-title('Robot Trajectories'); xlabel('X (m)'); ylabel('Y (m)');
+title('Robot Trajectories - FIXED VERSION'); xlabel('X (m)'); ylabel('Y (m)');
 legend('show'); grid on; axis equal;
 time_vec = (1:t) * sample_time;
 subplot(2, 2, 2);
